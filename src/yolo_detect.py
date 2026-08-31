@@ -14,14 +14,20 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--model', help='Path to YOLO model file (example: "runs/detect/train/weights/best.pt")',
                     required=True)
 parser.add_argument('--source', help='Image source, can be image file ("test.jpg"), \
-                    image folder ("test_dir"), video file ("testvid.mp4"), index of USB camera ("usb0"), or index of Picamera ("picamera0")', 
+                    image folder ("test_dir"), video file ("testvid.mp4"), index of USB camera ("usb0"), or index of Picamera ("picamera0")',
                     required=True)
 parser.add_argument('--thresh', help='Minimum confidence threshold for displaying detected objects (example: "0.4")',
                     default=0.5)
-parser.add_argument('--resolution', help='Resolution in WxH to display inference results at (example: "640x480"), \
-                    otherwise, match source resolution',
+parser.add_argument('--resolution', help='Resolution in WxH to resize inference results to (example: "640x480"), \
+                    otherwise, match source resolution. Affects both the saved output and any displayed window.',
                     default=None)
-parser.add_argument('--record', help='Record results from video or webcam and save it as "demo1.avi". Must specify --resolution argument to record.',
+parser.add_argument('--output', help='Where to save annotated results: a directory for image/folder sources \
+                    (one file per input image, same filename), or a video file path for video/camera sources \
+                    (".avi"/".mp4"; extension picked for you if omitted). Results are always saved, with or \
+                    without a display available.',
+                    default='output')
+parser.add_argument('--record', help='(Deprecated) Results are now always saved automatically to --output, \
+                    so this flag no longer does anything. Kept for backward compatibility.',
                     action='store_true')
 
 args = parser.parse_args()
@@ -32,7 +38,9 @@ model_path = args.model
 img_source = args.source
 min_thresh = float(args.thresh)
 user_res = args.resolution
-record = args.record
+
+if args.record:
+    print('NOTE: --record is deprecated and has no effect — results are now always saved automatically to --output.')
 
 # Check if model file exists and is valid
 if (not os.path.exists(model_path)):
@@ -74,19 +82,25 @@ if user_res:
     resize = True
     resW, resH = int(user_res.split('x')[0]), int(user_res.split('x')[1])
 
-# Check if recording is valid and set up recording
-if record:
-    if source_type not in ['video','usb']:
-        print('Recording only works for video and camera sources. Please try again.')
-        sys.exit(0)
-    if not user_res:
-        print('Please specify resolution to record video at.')
-        sys.exit(0)
-    
-    # Set up recording
-    record_name = 'demo1.avi'
-    record_fps = 30
-    recorder = cv2.VideoWriter(record_name, cv2.VideoWriter_fourcc(*'MJPG'), record_fps, (resW,resH))
+# Detect whether a GUI window can actually be shown. Headless environments (e.g. Colab,
+# SSH sessions, CI runners) have no X display on Linux, so cv2.imshow()/waitKey() would
+# crash the whole process instead of raising a catchable error. Skip them proactively.
+headless = ('DISPLAY' not in os.environ) and sys.platform.startswith('linux')
+if headless:
+    print('No display detected — running headless. Results will be saved to disk instead of shown in a window.')
+
+# Set up where annotated results get saved. This always happens, regardless of whether
+# a display is available, so results from a headless run (e.g. Colab) are still usable.
+save_video = source_type in ('video', 'usb', 'picamera')
+if save_video:
+    video_out_path = args.output if args.output.lower().endswith(('.avi', '.mp4')) else args.output + '.avi'
+    out_dir = os.path.dirname(video_out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    video_writer = None  # created lazily once the first frame's size is known
+else:
+    img_out_dir = args.output
+    os.makedirs(img_out_dir, exist_ok=True)
 
 # Load or initialize image source
 if source_type == 'image':
@@ -116,7 +130,7 @@ elif source_type == 'picamera':
     cap.start()
 
 # Set bounding box colors (using the Tableu 10 color scheme)
-bbox_colors = [(164,120,87), (68,148,228), (93,97,209), (178,182,133), (88,159,106), 
+bbox_colors = [(164,120,87), (68,148,228), (93,97,209), (178,182,133), (88,159,106),
               (96,202,231), (159,124,168), (169,162,241), (98,118,150), (172,176,184)]
 
 # Initialize control and status variables
@@ -138,13 +152,13 @@ while True:
         img_filename = imgs_list[img_count]
         frame = cv2.imread(img_filename)
         img_count = img_count + 1
-    
+
     elif source_type == 'video': # If source is a video, load next frame from video file
         ret, frame = cap.read()
         if not ret:
             print('Reached end of the video file. Exiting program.')
             break
-    
+
     elif source_type == 'usb': # If source is a USB camera, grab frame from camera
         ret, frame = cap.read()
         if (frame is None) or (not ret):
@@ -204,25 +218,43 @@ while True:
     # Calculate and draw framerate (if using video, USB, or Picamera source)
     if source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
         cv2.putText(frame, f'FPS: {avg_frame_rate:0.2f}', (10,20), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2) # Draw framerate
-    
+
     # Display detection results
     cv2.putText(frame, f'Number of objects: {object_count}', (10,40), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2) # Draw total number of detected objects
-    cv2.imshow('YOLO detection results',frame) # Display image
-    if record: recorder.write(frame)
+
+    # Save the annotated frame to disk (always, independent of whether a window is shown)
+    if save_video:
+        if video_writer is None:
+            h, w = frame.shape[:2]
+            video_fps = cap.get(cv2.CAP_PROP_FPS) if source_type == 'video' else 30
+            if not video_fps or video_fps <= 0:
+                video_fps = 30
+            fourcc = cv2.VideoWriter_fourcc(*('mp4v' if video_out_path.lower().endswith('.mp4') else 'MJPG'))
+            video_writer = cv2.VideoWriter(video_out_path, fourcc, video_fps, (w, h))
+        video_writer.write(frame)
+    else:
+        cv2.imwrite(os.path.join(img_out_dir, os.path.basename(img_filename)), frame)
+
+    # Show a window with results, if a display is actually available
+    if not headless:
+        cv2.imshow('YOLO detection results',frame) # Display image
 
     # If inferencing on individual images, wait for user keypress before moving to next image. Otherwise, wait 5ms before moving to next frame.
-    if source_type == 'image' or source_type == 'folder':
+    # Skip entirely when headless — there's no window to receive keypresses, and waitKey() would crash without a display.
+    if headless:
+        key = -1
+    elif source_type == 'image' or source_type == 'folder':
         key = cv2.waitKey()
     elif source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
         key = cv2.waitKey(5)
-    
+
     if key == ord('q') or key == ord('Q'): # Press 'q' to quit
         break
     elif key == ord('s') or key == ord('S'): # Press 's' to pause inference
         cv2.waitKey()
     elif key == ord('p') or key == ord('P'): # Press 'p' to save a picture of results on this frame
         cv2.imwrite('capture.png',frame)
-    
+
     # Calculate FPS for this frame
     t_stop = time.perf_counter()
     frame_rate_calc = float(1/(t_stop - t_start))
@@ -244,5 +276,11 @@ if source_type == 'video' or source_type == 'usb':
     cap.release()
 elif source_type == 'picamera':
     cap.stop()
-if record: recorder.release()
-cv2.destroyAllWindows()
+if save_video:
+    if video_writer is not None:
+        video_writer.release()
+        print(f'Saved annotated video to {video_out_path}')
+else:
+    print(f'Saved annotated images to {img_out_dir}/')
+if not headless:
+    cv2.destroyAllWindows()
