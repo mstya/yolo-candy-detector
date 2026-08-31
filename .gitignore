@@ -1,3 +1,15 @@
+# Project data & artifacts (kept out of git — see README for how to get them)
+data/images/
+data/.DS_Store
+video.mp4
+split-data/
+runs/
+*.pt
+
+# macOS / IDE
+.DS_Store
+.idea/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
