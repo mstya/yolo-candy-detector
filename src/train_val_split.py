@@ -18,12 +18,17 @@ parser.add_argument('--targetpath', help='Path to the target folder',
 parser.add_argument('--train_pct', help='Ratio of images to go to train folder; \
                     the rest go to validation folder (example: ".8")',
                     default=.8)
+parser.add_argument('--seed', help='Random seed for the train/validation split, so re-running with the same \
+                    data produces the same split (example: "42"). Useful for comparing metrics across \
+                    training runs on an unchanged dataset.',
+                    default=42)
 
 args = parser.parse_args()
 
 data_path = args.datapath
 target_path = args.targetpath
 train_percent = float(args.train_pct)
+random.seed(int(args.seed))
 
 # Check for valid entries
 if not os.path.isdir(data_path):
@@ -52,9 +57,11 @@ for dir_path in [train_img_path, train_txt_path, val_img_path, val_txt_path]:
       print(f'Created folder at {dir_path}.')
 
 
-# Get list of all images and annotation files
-img_file_list = [path for path in Path(input_image_path).rglob('*')]
-txt_file_list = [path for path in Path(input_label_path).rglob('*')]
+# Get list of all images and annotation files. Sorted so the order is deterministic across
+# OSes/filesystems (rglob order isn't guaranteed) — combined with --seed, this makes the
+# split fully reproducible.
+img_file_list = sorted(Path(input_image_path).rglob('*'))
+txt_file_list = sorted(Path(input_label_path).rglob('*'))
 
 print(f'Number of image files: {len(img_file_list)}')
 print(f'Number of annotation files: {len(txt_file_list)}')
